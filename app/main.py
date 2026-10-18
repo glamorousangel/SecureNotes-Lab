@@ -1,5 +1,6 @@
+
 """
-SecureNotes API  —  Week 14 Lab (STUDENT STARTER)
+SecureNotes API — Week 14 Lab (STUDENT STARTER)
 Web Systems and Technologies
 
 This app RUNS, but its security is fake. Right now:
@@ -10,13 +11,13 @@ This app RUNS, but its security is fake. Right now:
   - the admin page has no role check and leaks password data
 
 Your job (see the lab handout) is to make the 5 TASKS below real. Each TASK is
-marked with  # >>> TASK n  ...  # <<< END TASK n.  Don't change anything else.
+marked with # >>> TASK n ... # <<< END TASK n. Don't change anything else.
 
 Run it:
     uvicorn app.main:app --reload
 Docs:
     http://127.0.0.1:8000/docs
-Seeded accounts:  admin/admin123 (admin) · alice/alicepass · bob/bobpass
+Seeded accounts: admin/admin123 (admin) · alice/alicepass · bob/bobpass
 """
 
 import os
@@ -27,7 +28,6 @@ from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
-# You will need these two for the TASKS. They are already installed.
 from passlib.context import CryptContext
 from jose import jwt, JWTError
 
@@ -52,13 +52,17 @@ pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # >>> TASK 1 — Hash passwords with bcrypt (A04 Cryptographic Failures)
 # Replace these plaintext stubs so passwords are salted + hashed.
-#   hash_password("alicepass")  should return a bcrypt hash
+#   hash_password("alicepass") should return a bcrypt hash
 #   verify_password(raw, hashed) should return True/False safely
 def hash_password(raw: str) -> str:
-    return raw                       # TODO: return pwd.hash(raw)
+    return pwd.hash(raw)
+
 
 def verify_password(raw: str, hashed: str) -> bool:
-    return raw == hashed             # TODO: return pwd.verify(raw, hashed)
+    try:
+        return pwd.verify(raw, hashed)
+    except Exception:
+        return False
 # <<< END TASK 1
 
 
@@ -67,16 +71,27 @@ def verify_password(raw: str, hashed: str) -> bool:
 # JWT that carries the username in 'sub' and expires in TOKEN_MINUTES. Make
 # read_token decode it and return the username, or None if bad/expired.
 def create_token(username: str) -> str:
-    return username                  # TODO: build + sign a JWT (sub, exp)
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=TOKEN_MINUTES)
+    payload = {"sub": username, "exp": expires_at}
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
 
 def read_token(token: str):
-    return token                     # TODO: jwt.decode(...); return sub, or None on JWTError
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username = payload.get("sub")
+        if not isinstance(username, str) or not username:
+            return None
+        return username
+    except (JWTError, TypeError, ValueError):
+        return None
 # <<< END TASK 2
 
 
 # --- database (in-memory SQLite, seeded on startup) -----------------------
 db = sqlite3.connect(":memory:", check_same_thread=False)
 db.row_factory = sqlite3.Row
+
 
 def init_db():
     db.executescript(
@@ -102,10 +117,12 @@ def init_db():
     db.execute("INSERT INTO notes (owner_id,title,body) VALUES (3,'Bob plans','Bob secret note')")
     db.commit()
 
+
 def reset_database():
     db.execute("DROP TABLE IF EXISTS users")
     db.execute("DROP TABLE IF EXISTS notes")
     init_db()
+
 
 init_db()
 
@@ -113,6 +130,7 @@ init_db()
 class Credentials(BaseModel):
     username: str
     password: str
+
 
 class NewNote(BaseModel):
     title: str
@@ -125,14 +143,23 @@ class NewNote(BaseModel):
 # token is invalid OR the user doesn't exist. Only return a real user row.
 def get_current_user(token: str = Depends(oauth2)):
     username = read_token(token)
-    row = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
-    # TODO: if username is None -> 401 ; if row is None -> 401
+    if username is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    row = db.execute(
+        "SELECT * FROM users WHERE username = ?", (username,)
+    ).fetchone()
+
+    if row is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
     return row
 # <<< END TASK 3
 
 
 def require_admin(user=Depends(get_current_user)):
-    # TASK 5 will make this real.
+    if not user["is_admin"]:
+        raise HTTPException(status_code=403, detail="Admin access required")
     return user
 
 
@@ -148,6 +175,7 @@ def register(creds: Credentials):
     db.commit()
     return {"message": f"user {creds.username} created"}
 
+
 @app.post("/login")
 def login(creds: Credentials):
     row = db.execute(
@@ -157,21 +185,28 @@ def login(creds: Credentials):
         raise HTTPException(status_code=401, detail="Invalid username or password")
     return {"access_token": create_token(row["username"]), "token_type": "bearer"}
 
+
 @app.get("/notes")
 def list_my_notes(user=Depends(get_current_user)):
     rows = db.execute("SELECT * FROM notes WHERE owner_id = ?", (user["id"],)).fetchall()
     return [dict(r) for r in rows]
+
 
 @app.get("/notes/{note_id}")
 def get_note(note_id: int, user=Depends(get_current_user)):
     row = db.execute("SELECT * FROM notes WHERE id = ?", (note_id,)).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="Note not found")
+
     # >>> TASK 4 — Ownership check (A01 Broken Access Control)
     # This note must belong to the caller. Add a check: if it isn't theirs,
     # raise HTTPException(403). Right now ANY user can read ANY note.
+    if row["owner_id"] != user["id"]:
+        raise HTTPException(status_code=403, detail="You do not own this note")
     # <<< END TASK 4
+
     return dict(row)
+
 
 @app.post("/notes")
 def create_note(note: NewNote, user=Depends(get_current_user)):
@@ -182,14 +217,18 @@ def create_note(note: NewNote, user=Depends(get_current_user)):
     db.commit()
     return {"id": cur.lastrowid, "title": note.title}
 
+
 @app.get("/admin/users")
-def list_all_users(user=Depends(get_current_user)):
+def list_all_users(user=Depends(require_admin)):
     # >>> TASK 5 — Role check (A01 Broken Access Control)
     # Only admins may see this. Make it require the admin role (use require_admin),
     # and return ONLY id, username, is_admin — never the password column.
-    rows = db.execute("SELECT * FROM users").fetchall()   # leaks password hashes!
+    rows = db.execute(
+        "SELECT id, username, is_admin FROM users"
+    ).fetchall()
     return [dict(r) for r in rows]
     # <<< END TASK 5
+
 
 @app.get("/")
 def home():

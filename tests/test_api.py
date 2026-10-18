@@ -22,17 +22,39 @@ def test_register_then_login(client):
     # Register a new user, then log in as that user.
     # Assert login returns 200 AND the access_token looks like a JWT
     # (three dot-separated parts: token.count(".") == 2).
-    assert False, "TODO: write test_register_then_login"
+    register = client.post(
+        "/register", json={"username": "charlie", "password": "charliepass"}
+    )
+    assert register.status_code == 200
+
+    token = login(client, "charlie", "charliepass")
+    assert token is not None
+    assert token.count(".") == 2
 
 
 # ----- TODO 2 -------------------------------------------------------------
 def test_login_wrong_password_is_401(client):
     # Log in as 'alice' with the WRONG password. Assert the status code is 401.
-    assert False, "TODO: write test_login_wrong_password_is_401"
+    response = client.post(
+        "/login", json={"username": "alice", "password": "wrongpass"}
+    )
+    assert response.status_code == 401
 
 
 # ----- TODO 3 -------------------------------------------------------------
 def test_create_then_list_own_note(client):
     # Log in as alice, POST a new note, then GET /notes and assert the new
     # note's title appears in the list.
-    assert False, "TODO: write test_create_then_list_own_note"
+    token = login(client, "alice", "alicepass")
+    assert token is not None
+
+    created = client.post(
+        "/notes",
+        json={"title": "Alice test note", "body": "Private test content"},
+        headers=auth(token),
+    )
+    assert created.status_code == 200
+
+    notes = client.get("/notes", headers=auth(token))
+    assert notes.status_code == 200
+    assert any(note["title"] == "Alice test note" for note in notes.json())
